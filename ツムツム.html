@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Hard Tsum Tsum</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #222; font-family: sans-serif; user-select: none; touch-action: none; }
+        #game-stage { position: absolute; top: 0; left: 50%; transform: translateX(-50%); outline: 5px solid #444; }
+        #effect-canvas { position: absolute; top: 0; left: 50%; transform: translateX(-50%); pointer-events: none; }
+        #ui { position: fixed; top: 10px; left: calc(50% - 180px); pointer-events: none; z-index: 10; color: #fff; }
+        #score { font-size: 28px; font-weight: bold; }
+        .msg { font-size: 12px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="score">SCORE: 0</div>
+        <div class="msg">難易度：HARD (7色 + 鉄球)</div>
+    </div>
+
+    <div id="game-stage"></div>
+    <canvas id="effect-canvas"></canvas>
+
+    <script>
+        const { Engine, Render, Runner, Bodies, Composite, Query } = Matter;
+
+        const STAGE_W = 360;
+        const STAGE_H = window.innerHeight;
+        const TSUM_RADIUS = 22; // 少し小さくして密度を上げる
+        // 7色に増やして難易度アップ
+        const COLORS = ['#FF4444', '#44FF44', '#4444FF', '#FFFF44', '#FF44FF', '#44FFFF', '#FFAA00'];
+        let score = 0;
+
+        const engine = Engine.create({ gravity: { y: 1.2 } });
+        const render = Render.create({
+            element: document.getElementById('game-stage'),
+            engine: engine,
+            options: { width: STAGE_W, height: STAGE_H, wireframes: false, background: '#111' }
+        });
+
+        const ground = Bodies.rectangle(STAGE_W/2, STAGE_H + 25, STAGE_W, 50, { isStatic: true, render: { fillStyle: '#333' } });
+        const leftWall = Bodies.rectangle(-25, STAGE_H/2, 50, STAGE_H, { isStatic: true });
+        const rightWall = Bodies.rectangle(STAGE_W + 25, STAGE_H/2, 50, STAGE_H, { isStatic: true });
+        Composite.add(engine.world, [ground, leftWall, rightWall]);
+
+        // ツム生成（お邪魔キャラ対応）
+        function createTsum(x, y, isObstacle = false) {
+            if (isObstacle) {
+                // お邪魔鉄球：重くて繋げられない
+                return Bodies.circle(x, y, TSUM_RADIUS * 1.2, {
+                    restitution: 0.1, friction: 0.1, density: 0.1,
+                    render: { fillStyle: '#333', strokeStyle: '#000', lineWidth: 4 },
+                    label: 'obstacle'
+                });
+            }
+            const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+            return Bodies.circle(x, y, TSUM_RADIUS, {
+                restitution: 0.6, // 反発を強くしてバラけやすくする
+                friction: 0.001,
+                render: { fillStyle: color, strokeStyle: 'rgba(255,255,255,0.3)', lineWidth: 2 },
+                label: 'tsum',
+                colorType: color
+            });
+        }
+
+        // 初期投入（時々お邪魔を混ぜる）
+        for(let i=0; i<50; i++) {
+            const obstacle = Math.random() < 0.1; // 10%の確率でお邪魔
+            Composite.add(engine.world, createTsum(Math.random() * STAGE_W, -STAGE_H, obstacle));
+        }
+
+        // --- パーティクル & 操作ロジック (前回の仕組みを維持) ---
+        const efCanvas = document.getElementById('effect-canvas');
+        const efCtx = efCanvas.getContext('2d');
+        efCanvas.width = STAGE_W; efCanvas.height = STAGE_H;
+        let particles = [];
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x; this.y = y; this.color = color;
+                this.vx = (Math.random() - 0.5) * 12;
+                this.vy = (Math.random() - 0.5) * 12;
+                this.life = 1.0; this.decay = 0.03;
+            }
+            update() { this.x += this.vx; this.y += this.vy; this.vy += 0.3; this.life -= this.decay; }
+            draw(ctx) {
+                ctx.globalAlpha = this.life; ctx.fillStyle = this.color;
+                ctx.beginPath(); ctx.arc(this.x, this.y, 3, 0, Math.PI*2); ctx.fill();
+            }
+        }
+
+        function burst(x, y, color) { for(let i=0; i<8; i++) particles.push(new Particle(x, y, color)); }
+
+        let selectedTsums = [];
+        let isDragging = false;
+
+        const getPos = (e) => {
+            const t = e.touches ? e.touches[0] : e;
+            const r = efCanvas.getBoundingClientRect();
+            return { x: t.clientX - r.left, y: t.clientY - r.top };
+        };
+
+        const start = (e) => { isDragging = true; selectedTsums = []; };
+        const end = (e) => {
+            isDragging = false;
+            if (selectedTsums.length >= 3) {
+                score += Math.pow(selectedTsums.length, 2) * 10; // 長いほど高得点
+                document.getElementById('score').innerText = `SCORE: ${score}`;
+                selectedTsums.forEach(t => {
+                    burst(t.position.x, t.position.y, t.colorType);
+                    Composite.remove(engine.world, t);
+                    setTimeout(() => {
+                        const obstacle = Math.random() < 0.15; // 補充時もお邪魔が混ざる
+                        Composite.add(engine.world, createTsum(Math.random() * STAGE_W, -50, obstacle));
+                    }, 500);
+                });
+            } else {
+                selectedTsums.forEach(t => t.render.opacity = 1.0);
+            }
+            selectedTsums = [];
+        };
+
+        const move = (e) => {
+            if(!isDragging) return;
+            const pos = getPos(e);
+            const hit = Query.point(Composite.allBodies(engine.world), pos)[0];
+            if (hit && hit.label === 'tsum') {
+                if (selectedTsums.length === 0) {
+                    hit.render.opacity = 0.5; selectedTsums.push(hit);
+                } else {
+                    const last = selectedTsums[selectedTsums.length - 1];
+                    const dist = Math.hypot(hit.position.x - last.position.x, hit.position.y - last.position.y);
+                    if (hit.colorType === last.colorType && !selectedTsums.includes(hit) && dist < 55) {
+                        hit.render.opacity = 0.5; selectedTsums.push(hit);
+                        burst(hit.position.x, hit.position.y, '#fff');
+                    }
+                }
+            }
+        };
+
+        window.addEventListener('mousedown', start); window.addEventListener('touchstart', start);
+        window.addEventListener('mouseup', end); window.addEventListener('touchend', end);
+        window.addEventListener('mousemove', move); window.addEventListener('touchmove', move);
+
+        Render.run(render);
+        Runner.run(Runner.create(), engine);
+
+        function loop() {
+            requestAnimationFrame(loop);
+            efCtx.clearRect(0, 0, STAGE_W, STAGE_H);
+            particles = particles.filter(p => p.life > 0);
+            particles.forEach(p => { p.update(); p.draw(efCtx); });
+
+            if (selectedTsums.length > 1) {
+                efCtx.strokeStyle = selectedTsums[0].colorType;
+                efCtx.lineWidth = 5; efCtx.beginPath();
+                efCtx.moveTo(selectedTsums[0].position.x, selectedTsums[0].position.y);
+                selectedTsums.forEach(t => efCtx.lineTo(t.position.x, t.position.y));
+                efCtx.stroke();
+            }
+        }
+        loop();
+    </script>
+</body>
+</html>
